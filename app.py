@@ -1,4 +1,6 @@
 import io
+import tempfile
+import uuid
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +15,8 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
+
+CARPETA_TEMPORAL = Path(tempfile.gettempdir()) / "dashboard_uafe" / uuid.uuid4().hex
 
 COLORES = px.colors.qualitative.Set2
 MONTO = "$ %,.0f"
@@ -58,7 +62,7 @@ with st.sidebar:
     if archivos_subidos:
         fuentes = []
         for archivo in archivos_subidos:
-            temporal = Path("/tmp/opencode_uafe") / archivo.name
+            temporal = CARPETA_TEMPORAL / archivo.name
             temporal.parent.mkdir(exist_ok=True)
             temporal.write_bytes(archivo.getvalue())
             fuentes.append(temporal)
