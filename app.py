@@ -8,6 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 from clasificador import categoria_principal
+from nacionalidad import clasificar_identificacion
 from parser import leer_escrituras
 
 st.set_page_config(
@@ -36,16 +37,50 @@ def archivos_predeterminados():
     )
 
 
-def exportar_excel(df, resumen, otorgantes, beneficiarios):
+def exportar_excel(df, resumen, personas):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df.drop(columns=["objetos", "otorgantes", "beneficiarios"]).to_excel(
             writer, sheet_name="Escrituras", index=False
         )
         resumen.to_excel(writer, sheet_name="Resumen categorias")
-        otorgantes.to_excel(writer, sheet_name="Otorgantes", index=False)
-        beneficiarios.to_excel(writer, sheet_name="Beneficiarios", index=False)
+        personas.to_excel(writer, sheet_name="Personas", index=False)
     return buffer.getvalue()
+
+
+def expandir_participantes(df_base):
+    """Convierte las listas de otorgantes/beneficiarios en filas individuales
+    con su clasificación de nacionalidad."""
+    filas = []
+    for _, fila in df_base.iterrows():
+        for rol, columna in (("Otorgante", "otorgantes"), ("Beneficiario", "beneficiarios")):
+            for nombre, identificacion in fila[columna]:
+                clasificacion = clasificar_identificacion(identificacion)
+                filas.append(
+                    {
+                        "persona": nombre,
+                        "identificacion": identificacion,
+                        "rol": rol,
+                        "numero": fila["numero"],
+                        "mes": fila["mes"],
+                        "categoria": fila["categoria"],
+                        "valor_factura": fila["valor_factura"],
+                        "cuantia": fila["cuantia"],
+                        **clasificacion,
+                    }
+                )
+    personas = pd.DataFrame(filas)
+    if personas.empty:
+        return personas
+    orden_nacionalidad = {
+        "Ecuatoriana": 0, "Extranjera": 1, "Por verificar": 2,
+        "Sin identificar": 3,
+    }
+    personas["_orden"] = personas["nacionalidad"].map(orden_nacionalidad).fillna(9)
+    personas = personas.sort_values(
+        ["_orden", "es_extranjero", "persona"], na_position="last"
+    ).drop(columns="_orden")
+    return personas
 
 
 st.title("📊 Dashboard de Protocolo Notarial")
@@ -132,12 +167,13 @@ k4.metric("Cuantía registrada", f"$ {cuantia:,.0f}")
 k5.metric("Fojas consumidas", f"{fojas:,}")
 k6.metric("Autorizadas (FOR)", f"{pct_for:.1f}%")
 
-tab_resumen, tab_clasificacion, tab_finanzas, tab_personas, tab_temporal, tab_datos = st.tabs(
+tab_resumen, tab_clasificacion, tab_finanzas, tab_personas, tab_nacionalidad, tab_temporal, tab_datos = st.tabs(
     [
         "📌 Resumen",
         "🗂️ Clasificación",
         "💰 Finanzas",
         "👥 Personas",
+        "🌍 Nacionalidad",
         "📅 Temporalidad",
         "📋 Datos",
     ]
@@ -347,22 +383,9 @@ with tab_finanzas:
 with tab_personas:
     col1, col2 = st.columns(2)
 
-    def expandir_personas(df_base, columna):
-        filas = []
-        for _, fila in df_base.iterrows():
-            for nombre, identificacion in fila[columna]:
-                filas.append(
-                    {
-                        "persona": nombre,
-                        "identificacion": identificacion,
-                        "numero": fila["numero"],
-                        "valor_factura": fila["valor_factura"],
-                    }
-                )
-        return pd.DataFrame(filas)
-
-    otorgantes_exp = expandir_personas(datos, "otorgantes")
-    beneficiarios_exp = expandir_personas(datos, "beneficiarios")
+    participantes = expandir_participantes(datos)
+    otorgantes_exp = participantes[participantes["rol"] == "Otorgante"]
+    beneficiarios_exp = participantes[participantes["rol"] == "Beneficiario"]
 
     top_otorgantes = (
         otorgantes_exp.groupby(["persona", "identificacion"])
@@ -370,6 +393,9 @@ with tab_personas:
         .sort_values("escrituras", ascending=False)
         .head(15)
         .reset_index()
+    )
+    top_otorgantes["nacionalidad"] = top_otorgantes["identificacion"].apply(
+        lambda i: clasificar_identificacion(i)["nacionalidad"]
     )
     figura_otorgantes = px.bar(
         top_otorgantes.head(10),
@@ -387,6 +413,9 @@ with tab_personas:
         .sort_values("escrituras", ascending=False)
         .head(15)
         .reset_index()
+    )
+    top_beneficiarios["nacionalidad"] = top_beneficiarios["identificacion"].apply(
+        lambda i: clasificar_identificacion(i)["nacionalidad"]
     )
     figura_beneficiarios = px.bar(
         top_beneficiarios.head(10),
@@ -411,6 +440,114 @@ with tab_personas:
     col5, col6 = st.columns(2)
     col5.metric("Otorgantes únicos", f"{otorgantes_exp['identificacion'].nunique():,}")
     col6.metric("Beneficiarios únicos", f"{beneficiarios_exp['identificacion'].nunique():,}")
+
+with tab_nacionalidad:
+    st.caption(
+        "Clasificación según el documento de identidad registrado en el protocolo: "
+        "cédulas y RUC ecuatorianos validados con dígito verificador (SRI); "
+        "cualquier otro documento se considera extranjero. El país de origen de un "
+        "pasaporte no consta en los archivos fuente."
+    )
+
+    personas_unicas = (
+        participantes.drop_duplicates(subset=["identificacion"])
+        if not participantes.empty
+        else participantes
+    )
+    total_personas = len(personas_unicas)
+    n_ecuatorianas = (personas_unicas["nacionalidad"] == "Ecuatoriana").sum()
+    n_extranjeras = (personas_unicas["nacionalidad"] == "Extranjera").sum()
+    n_verificar = (personas_unicas["nacionalidad"] == "Por verificar").sum()
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Personas y entidades únicas", f"{total_personas:,}")
+    k2.metric("Ecuatorianas", f"{n_ecuatorianas:,}", f"{n_ecuatorianas / total_personas * 100:.1f}%")
+    k3.metric("Extranjeras", f"{n_extranjeras:,}", f"{n_extranjeras / total_personas * 100:.1f}%" if n_extranjeras else None)
+    k4.metric("Por verificar", f"{n_verificar:,}")
+    k5.metric(
+        "Provincias de origen",
+        f"{personas_unicas.loc[personas_unicas['provincia'] != '—', 'provincia'].nunique():,}",
+    )
+
+    col1, col2 = st.columns([2, 3])
+
+    composicion = (
+        personas_unicas.groupby(["nacionalidad", "tipo_documento"])
+        .size()
+        .reset_index(name="personas")
+        .sort_values("personas", ascending=False)
+    )
+    figura_composicion = px.pie(
+        composicion,
+        names="tipo_documento",
+        values="personas",
+        title="Composición de participantes por tipo de documento",
+        hole=0.4,
+        color_discrete_sequence=COLORES,
+    )
+    figura_composicion.update_traces(textinfo="percent")
+    col1.plotly_chart(figura_composicion, width='stretch')
+
+    provincias = (
+        personas_unicas[personas_unicas["provincia"] != "—"]["provincia"]
+        .value_counts()
+        .reset_index()
+    )
+    provincias.columns = ["Provincia", "Personas"]
+    figura_provincias = px.bar(
+        provincias.head(15),
+        x="Personas",
+        y="Provincia",
+        orientation="h",
+        text="Personas",
+        title="Provincia de emisión de la cédula (top 15)",
+        color="Personas",
+        color_continuous_scale="Teal",
+    )
+    figura_provincias.update_layout(yaxis=dict(autorange="reversed"), showlegend=False)
+    col2.plotly_chart(figura_provincias, width='stretch')
+
+    st.subheader("Participantes extranjeros y documentos por verificar")
+    columna_extranjeros = st.columns(1)[0]
+    extranjeros_tabla = personas_unicas[
+        personas_unicas["nacionalidad"].isin(["Extranjera", "Por verificar"])
+    ][
+        ["persona", "identificacion", "nacionalidad", "pais", "tipo_documento",
+         "provincia"]
+    ].rename(
+        columns={
+            "persona": "Nombre",
+            "identificacion": "Identificación",
+            "nacionalidad": "Nacionalidad",
+            "pais": "País",
+            "tipo_documento": "Tipo de documento",
+            "provincia": "Provincia",
+        }
+    )
+    if extranjeros_tabla.empty:
+        columna_extranjeros.info("No hay participantes extranjeros en la selección actual.")
+    else:
+        columna_extranjeros.dataframe(extranjeros_tabla, width='stretch', hide_index=True)
+
+    with st.expander("👤 Ver todas las personas y entidades con su clasificación"):
+        st.dataframe(
+            personas_unicas[
+                ["persona", "identificacion", "rol", "nacionalidad", "pais",
+                 "tipo_documento", "provincia"]
+            ].rename(
+                columns={
+                    "persona": "Nombre",
+                    "identificacion": "Identificación",
+                    "rol": "Rol",
+                    "nacionalidad": "Nacionalidad",
+                    "pais": "País",
+                    "tipo_documento": "Tipo de documento",
+                    "provincia": "Provincia",
+                }
+            ),
+            width='stretch',
+            hide_index=True,
+        )
 
 with tab_temporal:
     col1, col2 = st.columns([3, 2])
@@ -477,12 +614,18 @@ with tab_temporal:
 with tab_datos:
     st.subheader("Explorador de escrituras")
 
+    tabla = datos.copy()
+    tabla["extranjeros"] = tabla["otorgantes"].apply(
+        lambda lista: ", ".join(n for n, i in lista if clasificar_identificacion(i)["es_extranjero"])
+    ) + tabla["beneficiarios"].apply(
+        lambda lista: ", ".join(n for n, i in lista if clasificar_identificacion(i)["es_extranjero"])
+    )
     columnas_mostrar = [
         "numero", "fecha", "estado", "objeto", "categoria", "cuantia",
         "fojas", "folio_desde", "folio_hasta", "factura", "valor_factura",
-        "n_otorgantes", "n_beneficiarios", "archivo",
+        "n_otorgantes", "n_beneficiarios", "extranjeros", "archivo",
     ]
-    tabla = datos[columnas_mostrar].copy()
+    tabla = tabla[columnas_mostrar]
     tabla["fecha"] = tabla["fecha"].dt.strftime("%d/%m/%Y %H:%M")
 
     st.dataframe(tabla, width='stretch', height=450)
@@ -490,7 +633,7 @@ with tab_datos:
     columnas_excel = st.columns([1, 1, 4])
     with columnas_excel[0]:
         excel_bytes = exportar_excel(
-            datos, por_categoria, top_otorgantes, top_beneficiarios
+            datos, por_categoria, participantes
         )
         st.download_button(
             "⬇️ Descargar consolidado Excel",
