@@ -98,7 +98,7 @@ with st.sidebar:
         fuentes = []
         for archivo in archivos_subidos:
             temporal = CARPETA_TEMPORAL / archivo.name
-            temporal.parent.mkdir(exist_ok=True)
+            temporal.parent.mkdir(parents=True, exist_ok=True)
             temporal.write_bytes(archivo.getvalue())
             fuentes.append(temporal)
         st.success(f"{len(fuentes)} archivo(s) cargado(s)")
