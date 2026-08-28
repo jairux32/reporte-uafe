@@ -37,7 +37,7 @@ def archivos_predeterminados():
     )
 
 
-def exportar_excel(df, resumen, personas):
+def exportar_excel(df, resumen, personas, consolidado):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
         df.drop(columns=["objetos", "otorgantes", "beneficiarios"]).to_excel(
@@ -45,6 +45,7 @@ def exportar_excel(df, resumen, personas):
         )
         resumen.to_excel(writer, sheet_name="Resumen categorias")
         personas.to_excel(writer, sheet_name="Personas", index=False)
+        consolidado.to_excel(writer, sheet_name="Consolidado mensual", index=False)
     return buffer.getvalue()
 
 
@@ -157,6 +158,7 @@ ingresos = datos["valor_factura"].sum()
 cuantia = datos["cuantia"].sum()
 fojas = int(datos["fojas"].sum())
 pct_for = (datos["estado"] == "FOR").mean() * 100
+con_cuantia = datos[datos["cuantia"].notna()]
 
 st.subheader("Indicadores generales")
 k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -167,9 +169,10 @@ k4.metric("Cuantía registrada", f"$ {cuantia:,.0f}")
 k5.metric("Fojas consumidas", f"{fojas:,}")
 k6.metric("Autorizadas (FOR)", f"{pct_for:.1f}%")
 
-tab_resumen, tab_clasificacion, tab_finanzas, tab_personas, tab_nacionalidad, tab_temporal, tab_datos = st.tabs(
+tab_resumen, tab_consolidado, tab_clasificacion, tab_finanzas, tab_personas, tab_nacionalidad, tab_temporal, tab_datos = st.tabs(
     [
         "📌 Resumen",
+        "📊 Consolidado Total",
         "🗂️ Clasificación",
         "💰 Finanzas",
         "👥 Personas",
@@ -229,6 +232,119 @@ with tab_resumen:
             yaxis=dict(visible=False),
             xaxis=dict(title="Fecha de otorgamiento"),
             height=220,
+        ),
+        width='stretch',
+    )
+
+with tab_consolidado:
+    meses_cargados = datos["mes"].nunique()
+    dias_activos = datos["dia"].nunique()
+
+    st.subheader("Totales consolidados")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Meses consolidados", meses_cargados)
+    c2.metric("Días con actividad", dias_activos)
+    c3.metric("Escrituras totales", f"{total:,}")
+    c4.metric("Ingresos totales", f"$ {ingresos:,.2f}")
+    c5.metric("Fojas totales", f"{fojas:,}")
+
+    st.subheader("Medias y promedios")
+    promedio_cuantia = con_cuantia["cuantia"].mean() if not con_cuantia.empty else 0
+    medias = {
+        "Escrituras por mes": total / meses_cargados,
+        "Ingresos por mes ($)": ingresos / meses_cargados,
+        "Fojas por mes": fojas / meses_cargados,
+        "Cuantía por mes ($)": cuantia / meses_cargados,
+        "Escrituras por día activo": total / dias_activos,
+        "Ingresos por día activo ($)": ingresos / dias_activos,
+        "Valor factura promedio por escritura ($)": ingresos / total,
+        "Fojas promedio por escritura": fojas / total,
+        "Cuantía promedio por escritura con cuantía ($)": promedio_cuantia,
+    }
+    tabla_medias = pd.DataFrame(
+        [(k, v) for k, v in medias.items()],
+        columns=["Indicador", "Valor"],
+    )
+    tabla_medias["Valor"] = tabla_medias["Indicador"].apply(
+        lambda k: f"$ {medias[k]:,.2f}" if "$" in k else f"{medias[k]:,.1f}"
+    )
+    st.dataframe(tabla_medias, hide_index=True, width='stretch')
+
+    st.subheader("Detalle mensual con totales y media")
+    detalle_mes = (
+        datos.groupby("mes")
+        .agg(
+            Escrituras=("numero", "count"),
+            Ingresos=("valor_factura", "sum"),
+            Cuantia=("cuantia", "sum"),
+            Fojas=("fojas", "sum"),
+        )
+        .reset_index()
+        .rename(columns={"mes": "Mes"})
+    )
+    fila_total = {
+        "Mes": "TOTAL",
+        "Escrituras": detalle_mes["Escrituras"].sum(),
+        "Ingresos": detalle_mes["Ingresos"].sum(),
+        "Cuantia": detalle_mes["Cuantia"].sum(),
+        "Fojas": detalle_mes["Fojas"].sum(),
+    }
+    fila_media = {
+        "Mes": f"MEDIA MENSUAL ({meses_cargados} meses)",
+        "Escrituras": round(detalle_mes["Escrituras"].mean(), 1),
+        "Ingresos": round(detalle_mes["Ingresos"].mean(), 2),
+        "Cuantia": round(detalle_mes["Cuantia"].mean(), 2),
+        "Fojas": round(detalle_mes["Fojas"].mean(), 1),
+    }
+    detalle_mes = pd.concat(
+        [detalle_mes, pd.DataFrame([fila_total]), pd.DataFrame([fila_media])],
+        ignore_index=True,
+    )
+    st.dataframe(
+        detalle_mes.style.format(
+            {
+                "Ingresos": "$ {:,.2f}",
+                "Cuantia": "$ {:,.2f}",
+                "Fojas": "{:,.0f}",
+                "Escrituras": "{:,.0f}",
+            },
+            na_rep="—",
+        ).set_properties(
+            subset=pd.IndexSlice[detalle_mes.index[-2:], :],
+            **{"font-weight": "bold", "background-color": "#eef5f4"},
+        ),
+        hide_index=True,
+        width='stretch',
+    )
+
+    st.subheader("Media mensual por categoría")
+    media_cat = (
+        datos.groupby(["categoria", "mes"])
+        .size()
+        .reset_index(name="escrituras")
+        .groupby("categoria")
+        .agg(
+            escrituras_totales=("escrituras", "sum"),
+            media_mensual=("escrituras", "mean"),
+        )
+        .join(
+            datos.groupby("categoria").agg(
+                ingresos_totales=("valor_factura", "sum"),
+                factura_promedio=("valor_factura", "mean"),
+                fojas_promedio=("fojas", "mean"),
+            )
+        )
+        .sort_values("escrituras_totales", ascending=False)
+    )
+    st.dataframe(
+        media_cat.style.format(
+            {
+                "ingresos_totales": "$ {:,.2f}",
+                "factura_promedio": "$ {:,.2f}",
+                "media_mensual": "{:,.1f}",
+                "fojas_promedio": "{:,.1f}",
+                "escrituras_totales": "{:,.0f}",
+            }
         ),
         width='stretch',
     )
@@ -338,7 +454,6 @@ with tab_finanzas:
     col2.plotly_chart(figura_ingresos_cat, width='stretch')
 
     col3, col4 = st.columns(2)
-    con_cuantia = datos[datos["cuantia"].notna()]
     top_cuantia = con_cuantia.nlargest(10, "cuantia")[
         ["numero", "fecha", "objeto", "cuantia", "otorgantes"]
     ].copy()
@@ -633,7 +748,7 @@ with tab_datos:
     columnas_excel = st.columns([1, 1, 4])
     with columnas_excel[0]:
         excel_bytes = exportar_excel(
-            datos, por_categoria, participantes
+            datos, por_categoria, participantes, detalle_mes
         )
         st.download_button(
             "⬇️ Descargar consolidado Excel",
